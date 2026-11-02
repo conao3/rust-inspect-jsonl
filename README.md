@@ -19,12 +19,21 @@ cargo run -- session inspect-session --session-log file://session.jsonl
 ## Grammar
 
 - Every parameter is a named `--kebab-case` option. There are no positional arguments.
-- A value starting with `file://` is replaced by the content of that file. Read stdin with `file:///dev/stdin`.
+- A value starting with `file://` names a file to read. Read stdin with `file:///dev/stdin`. `--session-log` reads its file line by line, so memory use stays flat for any log size; any other value of `--session-log` is the log itself.
 - `--cli-input-json file://input.json` passes all parameters as a JSON object keyed by the PascalCase parameter names (`SessionLog`). Parameters given on the command line take precedence.
-- `--generate-cli-skeleton input` prints the input skeleton and `--generate-cli-skeleton output` prints the output skeleton.
-- Global options: `--output json|text|table` (default `json`), `--query <JMESPath>`, `--debug`, `--version`.
+- `--generate-cli-skeleton input` prints the input skeleton and `--generate-cli-skeleton output` prints the two output line shapes (an event and the summary).
+- Global options: `--output json|text|table` (default `json`), `--query <JMESPath>`, `--debug` (also reports each skipped line on stderr), `--version`.
 - `help` works at every level: `rust-inspect-jsonl help`, `rust-inspect-jsonl session help`, `rust-inspect-jsonl session inspect-session help`.
-- Exit codes: `0` success, `252` syntax or parameter error, `254` the input cannot be processed (no line of `--session-log` is JSON), `255` other failures.
+- Exit codes: `0` success, `252` syntax or parameter error (including a `file://` path that cannot be opened), `254` the input cannot be processed (no non-empty line of `--session-log` is JSON), `255` other failures.
+
+### Streaming exception
+
+`session inspect-session` streams its result instead of printing one JSON document at the end:
+
+- `--output json` writes NDJSON: one compact JSON object per parsed event as soon as its line is read, then one summary line.
+- `--output text` and `--output table` render each line on its own.
+- `--query` is applied to each line separately, including the summary line (a query for an event field gives `null` on the summary line).
+- With exit code `254` the summary line is still written before the error.
 
 ## Commands
 
@@ -36,31 +45,19 @@ rust-inspect-jsonl session inspect-session --session-log file://session.jsonl
 
 Parameters:
 
-- `--session-log`: content of the raw JSONL session log (use `file://`).
+- `--session-log`: the raw JSONL session log (use `file://<path>` or `file:///dev/stdin`).
 
-Output: one JSON object. `Events` holds one normalized analysis event per JSON line, `ParsedLines` counts them, and `SkippedLines` lists the lines that are not JSON with their parse error. `Usage` is copied from the log as is.
+Output: one event line per JSON line of the log, then a summary line. `Usage` is copied from the log as is. `SkippedLines` lists the lines that are not JSON (or not UTF-8) with their parse error.
 
 ```json
-{
-  "ParsedLines": 1,
-  "SkippedLines": [],
-  "Events": [
-    {
-      "LineNumber": 1,
-      "Timestamp": "2026-02-27T09:36:33Z",
-      "EventType": "assistant",
-      "ToolName": null,
-      "Usage": {"input_tokens": 123, "output_tokens": 45, "cache_read_input_tokens": 1000},
-      "Payload": {"Kind": "text", "Chars": 320}
-    }
-  ]
-}
+{"LineNumber":1,"Timestamp":"2026-02-27T09:36:33Z","EventType":"assistant","ToolName":null,"Usage":{"input_tokens":123,"output_tokens":45,"cache_read_input_tokens":1000},"Payload":{"Kind":"text","Chars":320}}
+{"ParsedLines":1,"SkippedLines":[]}
 ```
 
-Write the events as JSONL for later processing with `jq`:
+Keep only the events:
 
 ```sh
-rust-inspect-jsonl session inspect-session --session-log file://session.jsonl | jq -c '.Events[]' > events.inspect.jsonl
+rust-inspect-jsonl session inspect-session --session-log file://session.jsonl | jq -c 'select(has("LineNumber"))' > events.inspect.jsonl
 ```
 
 ## Verification

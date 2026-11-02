@@ -5,10 +5,14 @@ mod output;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, BufWriter, Cursor, Write};
 
 use error::{Result, other, parameter, target};
 use grammar::{CliInputArgs, SkeletonKind};
-use output::{OutputFormat, Response};
+use output::OutputFormat;
+
+const SESSION_LOG: &str = "session-log";
 
 #[derive(Parser)]
 #[command(
@@ -17,10 +21,10 @@ use output::{OutputFormat, Response};
     about = "Inspect Claude/Codex JSONL session logs"
 )]
 struct Cli {
-    /// Output format
+    /// Output format, applied to each output line (json writes one JSON object per line)
     #[arg(long, global = true, help_heading = "Global Options", value_enum, default_value_t = OutputFormat::Json)]
     output: OutputFormat,
-    /// JMESPath expression applied to the output
+    /// JMESPath expression applied to each output line
     #[arg(
         long,
         global = true,
@@ -44,14 +48,14 @@ enum Command {
 
 #[derive(Subcommand)]
 enum SessionCommand {
-    /// Normalize every JSON line of a session log into an analysis event with its timestamp, type, tool name, usage, and payload size
+    /// Stream one normalized analysis event per JSON line of a session log (timestamp, type, tool name, usage, payload size), then one summary line
     #[command(name = "inspect-session")]
     Inspect(InspectSessionArgs),
 }
 
 #[derive(Args)]
 struct InspectSessionArgs {
-    /// Content of the JSONL session log. Use file://session.jsonl to read a file and file:///dev/stdin to read stdin
+    /// JSONL session log, read line by line. Use file://session.jsonl to read a file and file:///dev/stdin to read stdin; any other value is the log itself
     #[arg(long)]
     session_log: String,
     #[command(flatten)]
@@ -60,10 +64,9 @@ struct InspectSessionArgs {
 
 #[derive(Serialize, Default)]
 #[serde(rename_all = "PascalCase")]
-struct InspectSessionReport {
+struct InspectSessionSummary {
     parsed_lines: usize,
     skipped_lines: Vec<SkippedLine>,
-    events: Vec<InspectEvent>,
 }
 
 #[derive(Serialize, Default)]
@@ -91,19 +94,6 @@ struct PayloadInfo {
     chars: usize,
 }
 
-impl InspectSessionReport {
-    fn skeleton() -> Self {
-        Self {
-            parsed_lines: 0,
-            skipped_lines: vec![SkippedLine::default()],
-            events: vec![InspectEvent {
-                usage: json!({}),
-                ..InspectEvent::default()
-            }],
-        }
-    }
-}
-
 fn main() {
     let code = match run() {
         Ok(()) => 0,
@@ -119,19 +109,42 @@ fn to_value<T: Serialize>(value: &T) -> Result<Value> {
     serde_json::to_value(value).map_err(|error| other(error.to_string()))
 }
 
-fn output_skeleton(path: &[String]) -> Result<Value> {
+fn output_skeleton(path: &[String]) -> Result<Vec<Value>> {
     match path.last().map(String::as_str) {
-        Some("inspect-session") => to_value(&InspectSessionReport::skeleton()),
+        Some("inspect-session") => Ok(vec![
+            to_value(&InspectEvent {
+                usage: json!({}),
+                ..InspectEvent::default()
+            })?,
+            to_value(&InspectSessionSummary {
+                parsed_lines: 0,
+                skipped_lines: vec![SkippedLine::default()],
+            })?,
+        ]),
         _ => Err(parameter(
             "--generate-cli-skeleton needs a command and a subcommand",
         )),
     }
 }
 
+fn open_session_log(session_log: String) -> Result<Box<dyn BufRead>> {
+    match session_log.strip_prefix("file://") {
+        Some(path) => {
+            let file = File::open(path).map_err(|error| {
+                parameter(format!(
+                    "Error parsing parameter: Unable to load paramfile {session_log}: {error}"
+                ))
+            })?;
+            Ok(Box::new(BufReader::new(file)))
+        }
+        None => Ok(Box::new(Cursor::new(session_log.into_bytes()))),
+    }
+}
+
 fn run() -> Result<()> {
     let mut root = Cli::command();
     root.build();
-    let prepared = grammar::prepare(&root, std::env::args_os().collect())?;
+    let prepared = grammar::prepare(&root, std::env::args_os().collect(), &[SESSION_LOG])?;
     let debug = prepared.argv.iter().any(|token| token == "--debug");
     if debug {
         let argv: Vec<String> = prepared.argv[1..]
@@ -153,14 +166,21 @@ fn run() -> Result<()> {
                 "--generate-cli-skeleton needs a command and a subcommand",
             ));
         }
-        let value = match kind {
-            SkeletonKind::Input => grammar::input_skeleton(command),
-            SkeletonKind::Output => output_skeleton(&prepared.path)?,
-        };
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&value).map_err(|error| other(error.to_string()))?
-        );
+        match kind {
+            SkeletonKind::Input => println!(
+                "{}",
+                serde_json::to_string_pretty(&grammar::input_skeleton(command))
+                    .map_err(|error| other(error.to_string()))?
+            ),
+            SkeletonKind::Output => {
+                for value in output_skeleton(&prepared.path)? {
+                    println!(
+                        "{}",
+                        serde_json::to_string(&value).map_err(|error| other(error.to_string()))?
+                    );
+                }
+            }
+        }
         return Ok(());
     }
 
@@ -173,69 +193,99 @@ fn run() -> Result<()> {
         }
     };
 
-    if let Some(query) = &cli.query {
-        output::compile_query(query)?;
-    }
-    let Command::Session(command) = cli.command;
-    let (name, report) = match command {
-        SessionCommand::Inspect(args) => ("inspect-session", inspect(&args.session_log)?),
+    let query = cli
+        .query
+        .as_deref()
+        .map(output::compile_query)
+        .transpose()?;
+    let Command::Session(SessionCommand::Inspect(args)) = cli.command;
+    let title = grammar::pascal_case("inspect-session");
+    let reader = open_session_log(args.session_log)?;
+    let mut out = BufWriter::new(io::stdout().lock());
+    let mut emit = |value: Value| -> Result<()> {
+        let line = output::render_line(&title, value, cli.output, query.as_ref())?;
+        write_out(&mut out, line.as_bytes())
     };
-    if debug {
-        eprintln!(
-            "debug: parsed {} lines, skipped {} lines",
-            report.parsed_lines,
-            report.skipped_lines.len()
-        );
+    let summary = inspect(reader, &mut emit, debug)?;
+    let not_jsonl = summary.parsed_lines == 0 && !summary.skipped_lines.is_empty();
+    let skipped = summary.skipped_lines.len();
+    emit(to_value(&summary)?)?;
+    drop(emit);
+    out.flush().or_else(broken_pipe)?;
+    if not_jsonl {
+        return Err(target(format!(
+            "--session-log is not JSONL: none of its {skipped} non-empty lines is JSON"
+        )));
     }
-    print!(
-        "{}",
-        output::render(
-            &grammar::pascal_case(name),
-            Response {
-                value: to_value(&report)?,
-                text: None,
-            },
-            cli.output,
-            cli.query.as_deref()
-        )?
-    );
     Ok(())
 }
 
-fn inspect(session_log: &str) -> Result<InspectSessionReport> {
-    let mut report = InspectSessionReport::default();
+fn broken_pipe(error: io::Error) -> Result<()> {
+    if error.kind() == io::ErrorKind::BrokenPipe {
+        std::process::exit(0);
+    }
+    Err(other(format!("failed to write the output: {error}")))
+}
 
-    for (index, line) in session_log.lines().enumerate() {
-        if line.trim().is_empty() {
-            continue;
+fn write_out(out: &mut impl Write, bytes: &[u8]) -> Result<()> {
+    out.write_all(bytes).or_else(broken_pipe)
+}
+
+fn inspect(
+    mut reader: impl BufRead,
+    emit: &mut impl FnMut(Value) -> Result<()>,
+    debug: bool,
+) -> Result<InspectSessionSummary> {
+    let mut summary = InspectSessionSummary::default();
+    let mut buffer = Vec::new();
+    let mut line_number = 0;
+
+    loop {
+        buffer.clear();
+        let read = reader
+            .read_until(b'\n', &mut buffer)
+            .map_err(|error| target(format!("failed to read --session-log: {error}")))?;
+        if read == 0 {
+            break;
         }
+        line_number += 1;
+        let parsed = std::str::from_utf8(&buffer)
+            .map_err(|error| error.to_string())
+            .and_then(|line| {
+                if line.trim().is_empty() {
+                    Ok(None)
+                } else {
+                    serde_json::from_str::<Value>(line)
+                        .map(Some)
+                        .map_err(|error| error.to_string())
+                }
+            });
 
-        match serde_json::from_str::<Value>(line) {
-            Ok(value) => {
-                report.parsed_lines += 1;
-                report.events.push(InspectEvent {
-                    line_number: index + 1,
+        match parsed {
+            Ok(None) => {}
+            Ok(Some(value)) => {
+                summary.parsed_lines += 1;
+                emit(to_value(&InspectEvent {
+                    line_number,
                     timestamp: find_string(&value, &["timestamp", "created_at", "createdAt"]),
                     event_type: find_event_type(&value),
                     tool_name: find_tool_name(&value),
                     usage: find_usage(&value),
                     payload: payload_info(&value),
-                });
+                })?)?;
             }
-            Err(error) => report.skipped_lines.push(SkippedLine {
-                line_number: index + 1,
-                error: error.to_string(),
-            }),
+            Err(error) => {
+                if debug {
+                    eprintln!("debug: skipped line {line_number}: {error}");
+                }
+                summary
+                    .skipped_lines
+                    .push(SkippedLine { line_number, error });
+            }
         }
     }
 
-    if report.parsed_lines == 0 && !report.skipped_lines.is_empty() {
-        return Err(target(format!(
-            "--session-log is not JSONL: none of its {} non-empty lines is JSON",
-            report.skipped_lines.len()
-        )));
-    }
-    Ok(report)
+    Ok(summary)
 }
 
 fn find_string(value: &Value, keys: &[&str]) -> Option<String> {
@@ -350,33 +400,51 @@ fn object_chars(map: &Map<String, Value>) -> usize {
 mod tests {
     use super::*;
 
+    fn run_inspect(log: &str) -> (Vec<Value>, Value) {
+        let mut events = Vec::new();
+        let summary = inspect(
+            Cursor::new(log.as_bytes().to_vec()),
+            &mut |value| {
+                events.push(value);
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+        (events, to_value(&summary).unwrap())
+    }
+
     #[test]
-    fn inspect_normalizes_lines_and_records_skipped_ones() {
+    fn inspect_streams_events_and_summarizes_skipped_lines() {
         let log = concat!(
             r#"{"type":"assistant","timestamp":"2026-02-27T09:36:33Z","message":{"usage":{"output_tokens":45},"content":[{"type":"tool_use","name":"Read","input":"abc"}]}}"#,
             "\n\nnot json\n"
         );
-        let value = to_value(&inspect(log).unwrap()).unwrap();
+        let (events, summary) = run_inspect(log);
         assert_eq!(
-            value,
+            events,
+            [json!({
+                "LineNumber": 1,
+                "Timestamp": "2026-02-27T09:36:33Z",
+                "EventType": "assistant",
+                "ToolName": "Read",
+                "Usage": {"output_tokens": 45},
+                "Payload": {"Kind": "tool_use", "Chars": 3}
+            })]
+        );
+        assert_eq!(
+            summary,
             json!({
                 "ParsedLines": 1,
-                "SkippedLines": [{"LineNumber": 3, "Error": "expected ident at line 1 column 2"}],
-                "Events": [{
-                    "LineNumber": 1,
-                    "Timestamp": "2026-02-27T09:36:33Z",
-                    "EventType": "assistant",
-                    "ToolName": "Read",
-                    "Usage": {"output_tokens": 45},
-                    "Payload": {"Kind": "tool_use", "Chars": 3}
-                }]
+                "SkippedLines": [{"LineNumber": 3, "Error": "expected ident at line 1 column 2"}]
             })
         );
     }
 
     #[test]
-    fn inspect_rejects_input_without_json_lines() {
-        let error = inspect("a\nb\n").err().unwrap();
-        assert_eq!(error.exit_code(), 254);
+    fn inspect_counts_a_line_without_trailing_newline() {
+        let (events, summary) = run_inspect("{\"type\":\"user\"}");
+        assert_eq!(events.len(), 1);
+        assert_eq!(summary["ParsedLines"], 1);
     }
 }

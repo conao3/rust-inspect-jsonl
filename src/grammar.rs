@@ -85,14 +85,17 @@ fn value_range(arg: &Arg) -> ValueRange {
     })
 }
 
-/// Expands `file://` values, rewrites a trailing `help` on an operation into `--help`, and merges `--cli-input-json` into the argument list.
-pub fn prepare(root: &Command, raw: Vec<OsString>) -> Result<Prepared> {
-    let mut argv = Vec::new();
+/// Expands `file://` values except those of the `streamed` parameters (which the command reads line by line itself), rewrites a trailing `help` on an operation into `--help`, and merges `--cli-input-json` into the argument list.
+pub fn prepare(root: &Command, raw: Vec<OsString>, streamed: &[&str]) -> Result<Prepared> {
+    let mut argv: Vec<String> = Vec::new();
     for token in raw {
         let token = token
             .into_string()
             .map_err(|token| parameter(format!("argument is not UTF-8: {token:?}")))?;
-        argv.push(if argv.is_empty() {
+        let is_streamed = streamed.iter().any(|name| {
+            argv.last() == Some(&format!("--{name}")) || token.starts_with(&format!("--{name}="))
+        });
+        argv.push(if argv.is_empty() || is_streamed {
             token
         } else {
             expand_file_value(&token)?

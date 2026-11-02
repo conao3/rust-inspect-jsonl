@@ -11,54 +11,36 @@ pub enum OutputFormat {
     Table,
 }
 
-pub struct Response {
-    pub value: Value,
-    pub text: Option<String>,
-}
-
-pub fn render(
+pub fn render_line(
     title: &str,
-    response: Response,
+    value: Value,
     format: OutputFormat,
-    query: Option<&str>,
+    query: Option<&jmespath::Expression<'static>>,
 ) -> Result<String> {
     let value = match query {
-        Some(expression) => search(expression, response.value)?,
-        None => response.value,
+        Some(expression) => {
+            let result = expression
+                .search(value)
+                .map_err(|error| parameter(format!("--query {expression}: {error}")))?;
+            serde_json::to_value(&*result).map_err(|error| other(error.to_string()))?
+        }
+        None => value,
     };
-    Ok(match format {
+    let mut out = String::new();
+    match format {
         OutputFormat::Json => {
-            let mut out =
-                serde_json::to_string_pretty(&value).map_err(|error| other(error.to_string()))?;
+            out = serde_json::to_string(&value).map_err(|error| other(error.to_string()))?;
             out.push('\n');
-            out
         }
-        OutputFormat::Text => match (query, response.text) {
-            (None, Some(text)) => text,
-            _ => {
-                let mut out = String::new();
-                text(&value, None, &mut out);
-                out
-            }
-        },
-        OutputFormat::Table => {
-            let mut out = String::new();
-            table(title, &value, &mut out);
-            out
-        }
-    })
+        OutputFormat::Text => text(&value, None, &mut out),
+        OutputFormat::Table => table(title, &value, &mut out),
+    }
+    Ok(out)
 }
 
 pub fn compile_query(expression: &str) -> Result<jmespath::Expression<'static>> {
     jmespath::compile(expression)
         .map_err(|error| parameter(format!("Bad value for --query {expression}: {error}")))
-}
-
-fn search(expression: &str, value: Value) -> Result<Value> {
-    let result = compile_query(expression)?
-        .search(value)
-        .map_err(|error| parameter(format!("--query {expression}: {error}")))?;
-    serde_json::to_value(&*result).map_err(|error| other(error.to_string()))
 }
 
 fn scalar(value: &Value) -> String {
@@ -232,14 +214,16 @@ mod tests {
     }
 
     #[test]
-    fn query_selects_a_field() {
-        let response = Response {
-            value: json!({"ContentSha256": "abc", "Sealed": true}),
-            text: None,
-        };
+    fn query_selects_a_field_and_json_is_one_line() {
+        let query = compile_query("ContentSha256").unwrap();
+        let value = json!({"ContentSha256": "abc", "Sealed": true});
         assert_eq!(
-            render("X", response, OutputFormat::Text, Some("ContentSha256")).unwrap(),
+            render_line("X", value.clone(), OutputFormat::Text, Some(&query)).unwrap(),
             "abc\n"
+        );
+        assert_eq!(
+            render_line("X", value, OutputFormat::Json, None).unwrap(),
+            "{\"ContentSha256\":\"abc\",\"Sealed\":true}\n"
         );
     }
 
