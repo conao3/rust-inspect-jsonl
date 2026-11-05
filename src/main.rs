@@ -58,14 +58,14 @@ struct InspectSessionSummary {
     skipped_lines: Vec<SkippedLine>,
 }
 
-#[derive(Serialize, Default)]
+#[derive(Serialize)]
 #[serde(rename_all = "PascalCase")]
 struct SkippedLine {
     line_number: usize,
     error: String,
 }
 
-#[derive(Serialize, Default)]
+#[derive(Serialize)]
 #[serde(rename_all = "PascalCase")]
 struct InspectEvent {
     line_number: usize,
@@ -76,7 +76,7 @@ struct InspectEvent {
     payload: PayloadInfo,
 }
 
-#[derive(Serialize, Default)]
+#[derive(Serialize)]
 #[serde(rename_all = "PascalCase")]
 struct PayloadInfo {
     kind: String,
