@@ -2,7 +2,7 @@ use clap::ValueEnum;
 use serde_json::Value;
 use unicode_width::UnicodeWidthStr;
 
-use crate::error::{Result, other, parameter};
+use crate::error::{Result, other};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum OutputFormat {
@@ -11,21 +11,7 @@ pub enum OutputFormat {
     Table,
 }
 
-pub fn render_line(
-    title: &str,
-    value: Value,
-    format: OutputFormat,
-    query: Option<&jmespath::Expression<'static>>,
-) -> Result<String> {
-    let value = match query {
-        Some(expression) => {
-            let result = expression
-                .search(value)
-                .map_err(|error| parameter(format!("--query {expression}: {error}")))?;
-            serde_json::to_value(&*result).map_err(|error| other(error.to_string()))?
-        }
-        None => value,
-    };
+pub fn render_line(title: &str, value: Value, format: OutputFormat) -> Result<String> {
     let mut out = String::new();
     match format {
         OutputFormat::Json => {
@@ -36,11 +22,6 @@ pub fn render_line(
         OutputFormat::Table => table(title, &value, &mut out),
     }
     Ok(out)
-}
-
-pub fn compile_query(expression: &str) -> Result<jmespath::Expression<'static>> {
-    jmespath::compile(expression)
-        .map_err(|error| parameter(format!("Bad value for --query {expression}: {error}")))
 }
 
 fn scalar(value: &Value) -> String {
@@ -214,15 +195,10 @@ mod tests {
     }
 
     #[test]
-    fn query_selects_a_field_and_json_is_one_line() {
-        let query = compile_query("ContentSha256").unwrap();
+    fn json_is_one_line() {
         let value = json!({"ContentSha256": "abc", "Sealed": true});
         assert_eq!(
-            render_line("X", value.clone(), OutputFormat::Text, Some(&query)).unwrap(),
-            "abc\n"
-        );
-        assert_eq!(
-            render_line("X", value, OutputFormat::Json, None).unwrap(),
+            render_line("X", value, OutputFormat::Json).unwrap(),
             "{\"ContentSha256\":\"abc\",\"Sealed\":true}\n"
         );
     }

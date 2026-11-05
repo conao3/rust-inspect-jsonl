@@ -20,9 +20,7 @@ cargo run -- session inspect-session --session-log file://session.jsonl
 
 - Every parameter is a named `--kebab-case` option. There are no positional arguments.
 - A value starting with `file://` names a file to read. Read stdin with `file:///dev/stdin`. `--session-log` reads its file line by line, so memory use stays flat for any log size; any other value of `--session-log` is the log itself.
-- `--cli-input-json file://input.json` passes all parameters as a JSON object keyed by the PascalCase parameter names (`SessionLog`). Parameters given on the command line take precedence.
-- `--generate-cli-skeleton input` prints the input skeleton and `--generate-cli-skeleton output` prints the two output line shapes (an event and the summary).
-- Global options: `--output json|text|table` (default `json`), `--query <JMESPath>`, `--debug` (also reports each skipped line on stderr), `--version`.
+- Global options: `--output json|text|table` (default `json`), `--debug` (also reports each skipped line on stderr), `--version`.
 - `help` works at every level: `rust-inspect-jsonl help`, `rust-inspect-jsonl session help`, `rust-inspect-jsonl session inspect-session help`.
 - Exit codes: `0` success, `252` syntax or parameter error (including a `file://` path that cannot be opened), `254` the input cannot be processed (no non-empty line of `--session-log` is JSON), `255` other failures.
 
@@ -32,7 +30,6 @@ cargo run -- session inspect-session --session-log file://session.jsonl
 
 - `--output json` writes NDJSON: one compact JSON object per parsed event as soon as its line is read, then one summary line.
 - `--output text` and `--output table` render each line on its own.
-- `--query` is applied to each line separately, including the summary line (a query for an event field gives `null` on the summary line).
 - With exit code `254` the summary line is still written before the error.
 
 ## Commands

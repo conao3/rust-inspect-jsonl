@@ -9,7 +9,6 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Cursor, Write};
 
 use error::{Result, other, parameter, target};
-use grammar::{CliInputArgs, SkeletonKind};
 use output::OutputFormat;
 
 const SESSION_LOG: &str = "session-log";
@@ -24,14 +23,6 @@ struct Cli {
     /// Output format, applied to each output line (json writes one JSON object per line)
     #[arg(long, global = true, help_heading = "Global Options", value_enum, default_value_t = OutputFormat::Json)]
     output: OutputFormat,
-    /// JMESPath expression applied to each output line
-    #[arg(
-        long,
-        global = true,
-        help_heading = "Global Options",
-        value_name = "JMESPATH"
-    )]
-    query: Option<String>,
     /// Print debug logs to stderr
     #[arg(long, global = true, help_heading = "Global Options")]
     debug: bool,
@@ -58,8 +49,6 @@ struct InspectSessionArgs {
     /// JSONL session log, read line by line. Use file://session.jsonl to read a file and file:///dev/stdin to read stdin; any other value is the log itself
     #[arg(long)]
     session_log: String,
-    #[command(flatten)]
-    input: CliInputArgs,
 }
 
 #[derive(Serialize, Default)]
@@ -109,24 +98,6 @@ fn to_value<T: Serialize>(value: &T) -> Result<Value> {
     serde_json::to_value(value).map_err(|error| other(error.to_string()))
 }
 
-fn output_skeleton(path: &[String]) -> Result<Vec<Value>> {
-    match path.last().map(String::as_str) {
-        Some("inspect-session") => Ok(vec![
-            to_value(&InspectEvent {
-                usage: json!({}),
-                ..InspectEvent::default()
-            })?,
-            to_value(&InspectSessionSummary {
-                parsed_lines: 0,
-                skipped_lines: vec![SkippedLine::default()],
-            })?,
-        ]),
-        _ => Err(parameter(
-            "--generate-cli-skeleton needs a command and a subcommand",
-        )),
-    }
-}
-
 fn open_session_log(session_log: String) -> Result<Box<dyn BufRead>> {
     match session_log.strip_prefix("file://") {
         Some(path) => {
@@ -144,47 +115,17 @@ fn open_session_log(session_log: String) -> Result<Box<dyn BufRead>> {
 fn run() -> Result<()> {
     let mut root = Cli::command();
     root.build();
-    let prepared = grammar::prepare(&root, std::env::args_os().collect(), &[SESSION_LOG])?;
-    let debug = prepared.argv.iter().any(|token| token == "--debug");
+    let argv = grammar::prepare(&root, std::env::args_os().collect(), &[SESSION_LOG])?;
+    let debug = argv.iter().any(|token| token == "--debug");
     if debug {
-        let argv: Vec<String> = prepared.argv[1..]
+        let shown: Vec<String> = argv[1..]
             .iter()
             .map(|token| token.chars().take(200).collect())
             .collect();
-        eprintln!("debug: argv {argv:?}");
+        eprintln!("debug: argv {shown:?}");
     }
 
-    if let Some(kind) = prepared.skeleton {
-        let mut command = &root;
-        for name in &prepared.path {
-            command = command
-                .find_subcommand(name)
-                .ok_or_else(|| other(format!("unknown subcommand {name}")))?;
-        }
-        if command.has_subcommands() {
-            return Err(parameter(
-                "--generate-cli-skeleton needs a command and a subcommand",
-            ));
-        }
-        match kind {
-            SkeletonKind::Input => println!(
-                "{}",
-                serde_json::to_string_pretty(&grammar::input_skeleton(command))
-                    .map_err(|error| other(error.to_string()))?
-            ),
-            SkeletonKind::Output => {
-                for value in output_skeleton(&prepared.path)? {
-                    println!(
-                        "{}",
-                        serde_json::to_string(&value).map_err(|error| other(error.to_string()))?
-                    );
-                }
-            }
-        }
-        return Ok(());
-    }
-
-    let cli = match Cli::try_parse_from(&prepared.argv) {
+    let cli = match Cli::try_parse_from(&argv) {
         Ok(cli) => cli,
         Err(error) => {
             let code = if error.use_stderr() { 252 } else { 0 };
@@ -193,17 +134,12 @@ fn run() -> Result<()> {
         }
     };
 
-    let query = cli
-        .query
-        .as_deref()
-        .map(output::compile_query)
-        .transpose()?;
     let Command::Session(SessionCommand::Inspect(args)) = cli.command;
     let title = grammar::pascal_case("inspect-session");
     let reader = open_session_log(args.session_log)?;
     let mut out = BufWriter::new(io::stdout().lock());
     let mut emit = |value: Value| -> Result<()> {
-        let line = output::render_line(&title, value, cli.output, query.as_ref())?;
+        let line = output::render_line(&title, value, cli.output)?;
         write_out(&mut out, line.as_bytes())
     };
     let summary = inspect(reader, &mut emit, debug)?;
