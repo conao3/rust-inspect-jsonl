@@ -7,7 +7,7 @@ description = "Inspect Claude/Codex JSONL session logs from the command line."
 repository = "https://github.com/conao3/rust-inspect-jsonl"
 
 [dependencies]
-clap = { version = "4.6.7", features = ["derive"] }
+clap = { version = "4.6.9", features = ["derive"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
 unicode-width = "0.2.3"
