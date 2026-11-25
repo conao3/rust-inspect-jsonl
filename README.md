@@ -11,10 +11,10 @@
 </p>
 
 <p align="center">
-  <a href="#install-and-develop">Install</a> ·
-  <a href="#grammar">Grammar</a> ·
-  <a href="#streaming-exception">Streaming</a> ·
-  <a href="#commands">Commands</a> ·
+  <a href="#install-and-develop">Install</a> |
+  <a href="#grammar">Grammar</a> |
+  <a href="#streaming-exception">Streaming</a> |
+  <a href="#commands">Commands</a> |
   <a href="#verification">Verification</a>
 </p>
 
